@@ -2,6 +2,14 @@
 
 **The OpenRouter for your own GPU.** One endpoint, many local models, one GPU.
 
+> **Project status: frozen at v0.2.0 (2026-11).** This is a personal/learning project, kept as-is.
+> An honest competitive survey found that [llama-swap](https://github.com/mostlygeek/llama-swap) (6k+ stars, MIT)
+> already does on-demand local model swapping with a mature feature set (aliases, API keys, groups, TTL, peers, Web UI),
+> llama.cpp ships a built-in router mode with LRU eviction, and RustingStrata itself hot-swaps models by name natively.
+> For production use, prefer llama-swap or [Superfluid](https://github.com/basecompute/superfluid) (agent-aware QoS,
+> park/resume, multi-machine fleets, Windows/Linux/macOS). qora-router remains useful as a zero-dependency,
+> single-file glue layer for heterogeneous engines (including non-OpenAI protocols) on a home LAN. No further features are planned.
+
 qora-router is a fully automatic router for local inference engines. Pick a model name per request and it loads, swaps, or attaches to whatever backend serves that model - including models from different engines. It switches **both models and engines** on demand, so OpenAI-compatible clients never see a "model not loaded" error.
 
 ```

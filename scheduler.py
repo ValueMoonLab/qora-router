@@ -613,7 +613,7 @@ class HTTPBackend:
                 return True
             if self.proc.poll() is not None:
                 return False
-            time.sleep(3)
+            time.sleep(0.5)
         return False
 
     def chat(self, model_info, messages, max_tokens=512, temperature=0.7,

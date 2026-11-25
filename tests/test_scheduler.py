@@ -6,12 +6,14 @@ with fake backends — no GPU, no engine binaries, no network downloads.
 """
 import json
 import os
+import socket
+import subprocess
 import sys
 import threading
 import unittest
 import urllib.request
 import urllib.error
-from http.server import ThreadingHTTPServer
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import scheduler  # noqa: E402
@@ -212,6 +214,18 @@ class TestHTTPSurface(unittest.TestCase):
         ids = {m["id"] for m in body["data"]}
         self.assertEqual(ids, {"m-a", "m-b", "m-ink"})
 
+    def test_engines(self):
+        code, body = self._get("/engines")
+        self.assertEqual(code, 200)
+        engines = body["engines"]
+        for name in ("llama.cpp", "ollama", "vllm", "sglang", "lmdeploy",
+                     "lm-studio", "koboldcpp", "tgi", "tensorrt-llm", "mlx",
+                     "localai", "jan", "gpt4all", "mistral.rs",
+                     "rustingstrata", "inkling"):
+            self.assertIn(name, engines)
+        names = {item["name"] for item in body["data"]}
+        self.assertIn("llama.cpp", names)
+
     def test_chat_default_model(self):
         code, body = self._post("/v1/chat/completions",
                                 {"messages": [{"role": "user", "content": "hi"}]})
@@ -244,6 +258,319 @@ class TestConfig(unittest.TestCase):
 
     def test_default_port(self):
         self.assertEqual(scheduler.DEFAULT_CONFIG["port"], 8090)
+
+
+def free_port():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+class FakeOpenAIServer:
+    """Tiny OpenAI-compatible server used to exercise HTTPBackend."""
+
+    def __init__(self):
+        self.requests = []
+        outer = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def _send(self, obj, code=200):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                if self.path in ("/v1/models", "/health"):
+                    self._send({"object": "list",
+                                "data": [{"id": "fake-server-model"}]})
+                else:
+                    self._send({"error": "not found"}, 404)
+
+            def do_POST(self):
+                if self.path != "/v1/chat/completions":
+                    self._send({"error": "not found"}, 404)
+                    return
+                length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(length) or b"{}")
+                outer.requests.append((self.path, body))
+                self._send({
+                    "id": "chatcmpl-http", "object": "chat.completion",
+                    "created": 0, "model": body.get("model", ""),
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "http ok"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                              "total_tokens": 2},
+                })
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.port = self.server.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.thread.start()
+
+    def healthy(self):
+        try:
+            with urllib.request.urlopen(self.url + "/v1/models", timeout=5) as r:
+                return r.status == 200
+        except Exception:
+            return False
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+MANAGED_SERVER = """
+import json
+import sys
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_GET(self):
+        data = json.dumps({"object": "list",
+                           "data": [{"id": "managed-model"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Handler).serve_forever()
+"""
+
+
+class TestHTTPBackend(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeOpenAIServer()
+
+    def tearDown(self):
+        self.fake.close()
+
+    def test_attach_external_start_and_stop(self):
+        backend = scheduler.HTTPBackend("llamacpp", {"base_url": self.fake.url})
+        self.assertTrue(backend.external)
+        self.assertTrue(backend.start())
+        self.assertTrue(backend.alive)
+        backend.stop()
+        # External servers are never killed by the router.
+        self.assertTrue(self.fake.healthy())
+
+    def test_external_start_fails_when_unreachable(self):
+        port = free_port()
+        backend = scheduler.HTTPBackend(
+            "dead", {"base_url": f"http://127.0.0.1:{port}"})
+        self.assertFalse(backend.start())
+        self.assertFalse(backend.alive)
+
+    def test_managed_config_attaches_to_existing_server_without_killing_it(self):
+        backend = scheduler.HTTPBackend(
+            "managed", {"exe": "engine-that-is-already-running",
+                        "base_url": self.fake.url})
+        self.assertFalse(backend.external)
+        self.assertTrue(backend.start())
+        self.assertFalse(backend.owned)
+        self.assertTrue(backend.alive)
+        backend.stop()
+        self.assertTrue(self.fake.healthy())
+
+    def test_chat_request_body_merge_overrides_model(self):
+        backend = scheduler.HTTPBackend("llamacpp", {"base_url": self.fake.url})
+        self.assertTrue(backend.start())
+        messages = [{"role": "user", "content": "hi"}]
+        result = backend.chat(
+            {"request": {"model": "server-override", "top_p": 0.8}},
+            messages, max_tokens=9, temperature=0.2,
+            model_id="public-model")
+        self.assertEqual(result["choices"][0]["message"]["content"], "http ok")
+        path, body = self.fake.requests[-1]
+        self.assertEqual(path, "/v1/chat/completions")
+        self.assertEqual(body["model"], "server-override")
+        self.assertEqual(body["top_p"], 0.8)
+        self.assertEqual(body["max_tokens"], 9)
+        self.assertEqual(body["temperature"], 0.2)
+        self.assertEqual(body["messages"], messages)
+
+    def test_chat_without_request_mapping_uses_public_model(self):
+        backend = scheduler.HTTPBackend("llamacpp", {"base_url": self.fake.url})
+        self.assertTrue(backend.start())
+        backend.chat({}, [], model_id="public-model")
+        self.assertEqual(self.fake.requests[-1][1]["model"], "public-model")
+
+    def test_base_url_ending_in_v1_is_not_duplicated(self):
+        backend = scheduler.HTTPBackend(
+            "v1", {"base_url": self.fake.url + "/v1"})
+        self.assertTrue(backend.start())
+        backend.chat({}, [], model_id="public-model")
+        self.assertEqual(self.fake.requests[-1][0], "/v1/chat/completions")
+
+    def test_managed_start_and_stop(self):
+        port = free_port()
+        log_path = os.devnull
+        backend = scheduler.HTTPBackend("managed", {
+            "exe": sys.executable,
+            "args": ["-c", MANAGED_SERVER, str(port)],
+            "base_url": f"http://127.0.0.1:{port}",
+            "health_path": "/v1/models",
+            "startup_timeout": 15,
+        }, log_path=log_path)
+        self.assertFalse(backend.external)
+        try:
+            self.assertTrue(backend.start())
+            self.assertTrue(backend.alive)
+        finally:
+            backend.stop()
+        self.assertFalse(backend.alive)
+
+
+class TestHTTPRouting(unittest.TestCase):
+    def setUp(self):
+        self.fake = FakeOpenAIServer()
+
+    def tearDown(self):
+        self.fake.close()
+
+    def _scheduler(self):
+        cfg = dict(scheduler.DEFAULT_CONFIG)
+        cfg["models"] = {
+            "m-a": {"backend": "rs", "gguf": "a.gguf", "description": "A"},
+            "m-http": {"backend": "llamacpp",
+                       "request": {"model": "server-model"}},
+            "m-http2": {"backend": "llamacpp",
+                        "request": {"model": "server-model-2"}},
+        }
+        cfg["default_model"] = "m-a"
+        cfg["rs_exe"] = ""
+        cfg["ink_exe"] = ""
+        cfg["backends"] = {
+            "llamacpp": {"type": "http", "base_url": self.fake.url},
+        }
+        s = scheduler.Scheduler(cfg)
+        s.rs = FakeRS()  # the HTTP backend is real and GPU-free
+        return s
+
+    def test_engine_switch_rs_http_rs(self):
+        s = self._scheduler()
+        first = s.chat("m-a", [])
+        self.assertEqual(first["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(s.active_backend, "rs")
+        self.assertEqual(s.swap_count, 1)
+
+        second = s.chat("m-http", [])
+        self.assertEqual(second["choices"][0]["message"]["content"], "http ok")
+        self.assertEqual(s.active_backend, "llamacpp")
+        self.assertEqual(s.active_model, "m-http")
+        self.assertEqual(s.rs.stopped, 1)
+        self.assertEqual(s.swap_count, 2)
+        self.assertEqual(self.fake.requests[-1][1]["model"], "server-model")
+        self.assertEqual(
+            s.status()["backends"]["llamacpp"]["current_model"], "server-model")
+
+        third = s.chat("m-a", [])
+        self.assertEqual(third["choices"][0]["message"]["content"], "ok")
+        self.assertEqual(s.active_backend, "rs")
+        self.assertEqual(s.rs.started, ["a.gguf", "a.gguf"])
+        self.assertEqual(s.swap_count, 3)
+        # Switching away from an external HTTP server must not stop it.
+        self.assertTrue(self.fake.healthy())
+
+    def test_same_http_engine_model_switch_counts_only_when_id_differs(self):
+        s = self._scheduler()
+        s.chat("m-http", [])
+        self.assertEqual(s.swap_count, 1)
+        s.chat("m-http", [])
+        self.assertEqual(s.swap_count, 1)
+        s.chat("m-http2", [])
+        self.assertEqual(s.swap_count, 2)
+        self.assertEqual(self.fake.requests[-1][1]["model"], "server-model-2")
+        self.assertEqual(
+            s.status()["backends"]["llamacpp"]["current_model"], "server-model-2")
+
+    def test_generic_http_backend_alias_resolves(self):
+        cfg = dict(scheduler.DEFAULT_CONFIG)
+        cfg["models"] = {
+            "m-http": {"backend": "http", "request": {"model": "server-model"}},
+        }
+        cfg["default_model"] = "m-http"
+        cfg["rs_exe"] = ""
+        cfg["ink_exe"] = ""
+        cfg["backends"] = {
+            "llamacpp": {"type": "http", "base_url": self.fake.url},
+        }
+        s = scheduler.Scheduler(cfg)
+        backend_name, _ = s._resolve_model("m-http")
+        self.assertEqual(backend_name, "llamacpp")
+
+
+class TestBackendConfig(unittest.TestCase):
+    def test_unknown_backend_type_raises(self):
+        cfg = dict(scheduler.DEFAULT_CONFIG)
+        cfg["models"] = {}
+        cfg["default_model"] = "x"
+        cfg["backends"] = {"weird": {"type": "quantum"}}
+        with self.assertRaises(ValueError) as ctx:
+            scheduler.Scheduler(cfg)
+        self.assertIn("Unknown backend type", str(ctx.exception))
+
+    def test_infer_backend_type_from_fields(self):
+        s = scheduler.Scheduler.__new__(scheduler.Scheduler)
+        self.assertEqual(s._infer_backend_type({"gguf": "a.gguf"}), "rs")
+        self.assertEqual(s._infer_backend_type({"bridge_port": 1234}), "inkling")
+        self.assertEqual(
+            s._infer_backend_type({"base_url": "http://127.0.0.1:1"}), "http")
+
+    def test_model_resolution_by_gguf_and_bridge_port(self):
+        cfg = dict(scheduler.DEFAULT_CONFIG)
+        cfg["models"] = {
+            "gguf-model": {"gguf": "a.gguf"},
+            "bridge-model": {"bridge_port": 1234},
+        }
+        cfg["default_model"] = "gguf-model"
+        cfg["rs_exe"] = ""
+        cfg["ink_exe"] = ""
+        s = scheduler.Scheduler(cfg)
+        self.assertEqual(s._resolve_model("gguf-model")[0], "rs")
+        self.assertEqual(s._resolve_model("bridge-model")[0], "inkling")
+
+    def test_top_level_single_backend_config(self):
+        cfg = dict(scheduler.DEFAULT_CONFIG)
+        cfg["models"] = {"m": {"request": {"model": "server-model"}}}
+        cfg["default_model"] = "m"
+        cfg["rs_exe"] = ""
+        cfg["ink_exe"] = ""
+        cfg["type"] = "http"
+        cfg["base_url"] = "http://127.0.0.1:9"
+        s = scheduler.Scheduler(cfg)
+        self.assertEqual(s.backend_types["http"], "http")
+        self.assertEqual(s._resolve_model("m")[0], "http")
+
+
+class TestCLI(unittest.TestCase):
+    def test_list_engines(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        proc = subprocess.run(
+            [sys.executable, os.path.join(root, "scheduler.py"), "--list-engines"],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for name in ("llama.cpp", "ollama", "vllm", "sglang", "lmdeploy",
+                     "lm-studio", "koboldcpp", "tgi", "tensorrt-llm", "mlx",
+                     "localai", "jan", "gpt4all", "mistral.rs",
+                     "rustingstrata", "inkling"):
+            self.assertIn(name, proc.stdout)
 
 
 if __name__ == "__main__":

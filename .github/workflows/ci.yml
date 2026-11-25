@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax check
+        run: python -m py_compile scheduler.py
+      - name: CLI help smoke
+        run: python scheduler.py --help
+      - name: Example config is valid JSON
+        run: python -c "import json; json.load(open('config.example.json'))"
+      - name: Unit tests (no GPU required)
+        run: python -m unittest discover -s tests -v

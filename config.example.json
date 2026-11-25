@@ -1,1 +1,121 @@
-{"default_model": "qwen3.6-uncensored", "host": "0.0.0.0", "ink_chat_template": "", "ink_exe": "", "ink_max_context": 8192, "ink_model": "", "ink_tokenizer": "", "ink_vision": "", "models": {"inkling-2-mini": {"backend": "inkling", "description": "Inkling 2 Mini 26B looped MoE (SQ-10, ~37 tok/s, agentic coding)"}, "qwen3.6": {"backend": "rs", "description": "Qwen3.6 35B MoE official (Q2_K_XL)", "gguf": "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf"}, "qwen3.6-uncensored": {"backend": "rs", "description": "Qwen3.6 35B MoE uncensored (IQ2_M, ~100 tok/s)", "gguf": "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf"}}, "port": 8090, "rs_addr": "127.0.0.1:8084", "rs_ctx": 4096, "rs_exe": "", "rs_models_dir": "", "rs_parallel": 2, "swap_timeout": 300}
+{
+  "default_model": "qwen3.6-uncensored",
+  "host": "0.0.0.0",
+  "ink_chat_template": "",
+  "ink_exe": "",
+  "ink_max_context": 8192,
+  "ink_model": "",
+  "ink_tokenizer": "",
+  "ink_vision": "",
+  "models": {
+    "inkling-2-mini": {
+      "backend": "inkling",
+      "description": "Inkling 2 Mini 26B looped MoE (SQ-10, ~37 tok/s, agentic coding)"
+    },
+    "qwen3.6": {
+      "backend": "rs",
+      "description": "Qwen3.6 35B MoE official (Q2_K_XL)",
+      "gguf": "Qwen3.6-35B-A3B-UD-Q2_K_XL.gguf"
+    },
+    "qwen3.6-uncensored": {
+      "backend": "rs",
+      "description": "Qwen3.6 35B MoE uncensored (IQ2_M, ~100 tok/s)",
+      "gguf": "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ2_M.gguf"
+    }
+  },
+  "port": 8090,
+  "rs_addr": "127.0.0.1:8084",
+  "rs_ctx": 4096,
+  "rs_exe": "",
+  "rs_models_dir": "",
+  "rs_parallel": 2,
+  "swap_timeout": 300,
+  "_examples": {
+    "_comment": "Templates only. Merge a backend entry into the top-level 'backends' map and the matching models into 'models'. Paths and model ids are placeholders. See GET /engines or --list-engines for every engine.",
+    "llama_cpp": {
+      "backends": {
+        "llamacpp": {
+          "type": "http",
+          "exe": "llama-server",
+          "args": [
+            "-m",
+            "/path/to/model.gguf",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8085",
+            "-ngl",
+            "99",
+            "-c",
+            "4096"
+          ],
+          "base_url": "http://127.0.0.1:8085",
+          "health_path": "/health",
+          "startup_timeout": 180
+        }
+      },
+      "models": {
+        "llama-3.2-3b": {
+          "backend": "llamacpp",
+          "request": {
+            "model": "llama-3.2-3b"
+          },
+          "description": "llama.cpp example (set the GGUF path and model id)"
+        }
+      }
+    },
+    "ollama": {
+      "backends": {
+        "ollama": {
+          "type": "http",
+          "exe": "ollama",
+          "args": [
+            "serve"
+          ],
+          "base_url": "http://127.0.0.1:11434",
+          "health_path": "/api/tags",
+          "startup_timeout": 60
+        }
+      },
+      "models": {
+        "llama3.2:3b": {
+          "backend": "ollama",
+          "request": {
+            "model": "llama3.2:3b"
+          },
+          "description": "Ollama example (pull the model with: ollama pull llama3.2:3b)"
+        }
+      }
+    },
+    "vllm": {
+      "backends": {
+        "vllm": {
+          "type": "http",
+          "exe": "vllm",
+          "args": [
+            "serve",
+            "/path/to/model",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "8000",
+            "--gpu-memory-utilization",
+            "0.90"
+          ],
+          "base_url": "http://127.0.0.1:8000",
+          "health_path": "/health",
+          "startup_timeout": 300
+        }
+      },
+      "models": {
+        "qwen2.5-7b-instruct": {
+          "backend": "vllm",
+          "request": {
+            "model": "qwen2.5-7b-instruct"
+          },
+          "description": "vLLM example (set the model path; one server per model)"
+        }
+      }
+    }
+  }
+}

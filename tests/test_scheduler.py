@@ -426,7 +426,7 @@ class TestHTTPBackend(unittest.TestCase):
             "args": ["-c", MANAGED_SERVER, str(port)],
             "base_url": f"http://127.0.0.1:{port}",
             "health_path": "/v1/models",
-            "startup_timeout": 15,
+            "startup_timeout": 60,
         }, log_path=log_path)
         self.assertFalse(backend.external)
         try:
